@@ -34,7 +34,7 @@ import pandas as pd
 import requests
 import websocket
 
-print("Starting Optic Trader IQ worker build 2026-07-08-direct-websocket", flush=True)
+print("Starting Optic Trader IQ worker build 2026-07-09-auth-v2", flush=True)
 
 EMAIL = os.environ["IQ_EMAIL"]
 PASSWD = os.environ["IQ_PASSWORD"]
@@ -106,32 +106,45 @@ class IQWebSocketClient:
     def login(self):
         """HTTP login to obtain the ssid used by the WebSocket."""
         payload = {"identifier": self.email, "password": self.password}
-        headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-        endpoints = [
-            "https://auth.iqoption.com/api/v1.0/login",
-            "https://iqoption.com/api/login",
+        json_headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Origin": "https://iqoption.com",
+            "Referer": "https://iqoption.com/",
+        }
+        form_headers = {**json_headers, "Content-Type": "application/x-www-form-urlencoded"}
+        # Try the modern auth endpoints first. v2 is what iqoption.com currently uses.
+        attempts = [
+            ("https://auth.iqoption.com/api/v2/login", "json", json_headers),
+            ("https://auth.iqoption.com/api/v1.0/login", "json", json_headers),
+            ("https://api.iqoption.com/v1.0/login",     "form", form_headers),
+            ("https://iqoption.com/api/login",          "form", form_headers),
         ]
-        last_error = None
-        for url in endpoints:
+        errors = []
+        for url, kind, headers in attempts:
             try:
-                res = self._safe_post(url, json=payload, headers=headers)
-                if res.status_code >= 400:
-                    # Some legacy endpoints expect form data.
-                    res = self._safe_post(url, data=payload, headers={"User-Agent": "Mozilla/5.0"})
-                ssid = None
+                if kind == "json":
+                    res = self._safe_post(url, json=payload, headers=headers)
+                else:
+                    res = self._safe_post(url, data=payload, headers=headers)
                 try:
                     data = res.json()
-                    ssid = data.get("ssid") or data.get("data", {}).get("ssid")
                 except Exception:
                     data = {}
+                ssid = (
+                    (data.get("data") or {}).get("ssid")
+                    if isinstance(data.get("data"), dict) else None
+                ) or data.get("ssid")
                 ssid = ssid or res.cookies.get("ssid") or self.session.cookies.get("ssid")
                 if ssid:
-                    print(f"IQ HTTP login OK via {url.split('/api')[0]}", flush=True)
+                    print(f"IQ HTTP login OK via {url}", flush=True)
                     return ssid
-                last_error = f"{url} -> {res.status_code}: {str(data)[:180] or res.text[:180]}"
+                snippet = str(data)[:200] if data else res.text[:200]
+                errors.append(f"{url} -> {res.status_code}: {snippet}")
             except Exception as exc:
-                last_error = f"{url} -> {exc}"
-        raise RuntimeError(f"IQ Option login failed: {last_error}")
+                errors.append(f"{url} -> {exc}")
+        raise RuntimeError("IQ Option login failed:\n  " + "\n  ".join(errors))
 
     def connect(self):
         ssid = self.login()
